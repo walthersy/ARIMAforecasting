@@ -1,0 +1,389 @@
+---
+title: "Topics in Applied Econometrics"
+author: "Ken Sy"
+date: '2022-08-18'
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+abstract: In this report, I used ARIMA modelling to forecast (1) Melbourne Residential Property Price Index, (2) Total Number of Photovoltaic Installations in Australia, and (3) Quarterly US E-Commerce Retail Sales.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message= FALSE, warning = FALSE)
+```
+
+# Melbourne Residential Property Price Index
+
+### a. Reading and plotting the data
+```{r melb}
+library(readabs)
+library(dygraphs)
+
+melb <- read_abs(series_id = "A83728392R")
+melb.ts <- ts(melb$value, start=c(2003,3), frequency = 4)
+
+dygraph(melb.ts, main="Melbourne Residential Property Price Index")%>% 
+  dyRangeSelector() %>%
+  dyAxis("y",label = "Price Index")
+```
+
+```{r}
+# Reusable function for plotting level, diff, log, logged diff
+plot_4s <- function(ts.df){
+  par(mfrow=c(2,2))
+  plot(ts.df,main="Level")
+  plot(diff(ts.df), main="Diff")
+  plot(log(ts.df), main="Log")
+  plot(diff(log(ts.df)), main="Logged Diff")
+  par(mfrow=c(1,1)) # reset plot
+}
+
+plot_4s(melb.ts)
+```
+
+Looking at the charts above, the data is clearly not stationary and would need differencing in order to utilise ARIMA models for forecasting. Perhaps, a logged differencing might be better, as it looks more stable compared to non-logged difference. The non-logged difference has bigger variances around 2018 onwards.
+
+The stationarity can be confirmed using the ADF test.
+
+__ADF Test__
+
+```{r}
+library(tseries)
+adf.test(diff(melb.ts)) # Differenced
+adf.test(diff(log(melb.ts))) # Log-differenced
+```
+
+According to the ADF test, we fail to reject the null hypothesis of non-stationarity with differenced-only data. The data is only stationary after log-differenced.
+
+### b. Modelling
+
+```{r melb_forecast}
+library(forecast)
+log(melb.ts) %>% diff() %>% 
+  ggtsdisplay(main="Melbourne Residential Property Price Index (Logged 1st level difference)")
+```
+
+Looking at the ACF and PACF above, it seems like it has 1 or 2 MA components, and perhaps 3 AR components.
+ 
+Ljung Box test will be used to check for autocorrelation in the residuals of the models.
+
+
+$$H_0 :  \text{There is no autocorrelation in the residuals;}\\
+H_1 : \text{There is significant autocorrelation in the residuals}$$
+
+
+ __ARIMA(3,1,1)__
+```{r melb_arima}
+library(texreg)
+
+out.melb.311 <- Arima(log(melb.ts), order=c(3,1,1), include.constant = TRUE, method="ML")
+htmltools::HTML(htmlreg(out.melb.311, custom.model.names="ARIMA(3,1,1)", 
+        caption.above = TRUE, custom.note = "",
+        caption="ARIMA(3,1,1) Estimation Output"))
+
+
+#Residuals
+e.melb.311 <- out.melb.311$residuals
+
+#Box test
+Box.test(e.melb.311, type="Ljung-Box", lag = 24, fitdf=4)
+```
+
+ARIMA(3,1,1) has no autocorrelation since p-value is > 10% significance level.
+
+ __ARIMA(3,1,2)__
+
+```{r}
+out.melb.312 <- Arima(log(melb.ts), order=c(3,1,2), include.constant = TRUE, method="ML")
+htmltools::HTML(htmlreg(out.melb.312, custom.model.names="ARIMA(3,1,2)", 
+        caption.above = TRUE, custom.note = "",
+        caption="ARIMA(3,1,2) Estimation Output"))
+#Residuals
+e.melb.312 <- out.melb.312$residuals
+
+#Box Test
+Box.test(e.melb.312, type="Ljung-Box", lag = 20, fitdf=5)
+```
+
+ARIMA(3,1,2) also has no autocorrelation at the 10% significance level. However, following the principle of parsimony, I will be modelling the time series with ARIMA(3,1,1) since it is the simpler model.
+
+__Check `auto.arima()`__
+
+```{r}
+out.auto <- auto.arima(lag(melb.ts), ic="aic")
+htmltools::HTML(htmlreg(out.auto, custom.model.names="auto.arima", 
+        caption.above = TRUE, custom.note = "",
+        caption="auto.arima Estimation Output"))
+
+Box.test(out.auto$residuals,type="Ljung-Box", lag = 20, fitdf=4)
+```
+The `auto.arima` function suggested a seasonal ARIMA(3,1,0)(0,0,1) model. However, I don't think it has a seasonal component, only cyclical, which can't be modelled. Also, ARIMA(3,1,1) still has a lower AIC. 
+
+
+### c. Forecasting
+
+__Forecasting the next 4 quarters__
+```{r}
+fc.melb = forecast(out.melb.311, fan=TRUE, h=4)
+
+unlog <- function(fc, x.ts, out){
+  fc$x <- x.ts
+  fc$mean <- exp(fc$mean + out$sigma2/2)
+  fc$upper <- exp(fc$upper + out$sigma2/2)
+  fc$lower <- exp(fc$lower + out$sigma2/2)
+  return(fc)
+}
+
+fc.melb <- unlog(fc.melb, melb.ts, out.melb.311)
+
+autoplot(fc.melb, ylab="Price Index")
+```
+
+```{r}
+htmltools::HTML(htmlreg(out.melb.311, custom.model.names="ARIMA(3,1,1)", 
+        caption.above = TRUE, custom.note = "",
+        caption="ARIMA(3,1,1) Estimation Output"))
+```
+
+```{r}
+library(kableExtra)
+
+# Re-forecast with only 95% CI
+fc.melb.kable <- forecast(out.melb.311, level=.95, h=4)
+fc.melb.kable <- unlog(fc.melb.kable, melb.ts, out.melb.311)
+
+kable(fc.melb.kable, "html", caption="Forecasts") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+
+# Total Number of Photovoltaic Installations; Australia.
+
+### a. Reading and plotting the data
+
+```{r}
+pv <- read.csv("https://www.econ2041.duckdns.org/ECON8015/PV.csv")
+pv.ts <- ts(pv$Total, start=c(2007,1), frequency = 12)
+dygraph(pv.ts, main = "Total Number of Photovoltaic Installations; Australia") %>%
+  dyRangeSelector()
+```
+The data seems to be significantly different before and after 2018. I will just use the 2018 onwards data. However, the spikes are quite erratic, there is no clear seasonal pattern. Large spikes occured Sept 2018, Dec 2019, Dec 2020, and Nov 2021, which are not consistent.
+
+
+```{r}
+pv2 <- window(pv.ts,start=2018)
+plot_4s(pv2)
+```
+
+__ADF Test__
+
+```{r}
+adf.test(pv2) #Level
+adf.test(log(pv2)) #Level
+adf.test(diff(pv2)) # Differenced
+adf.test(diff(log(pv2))) # Log-differenced
+```
+ADF Test indicates log(pv2) is not stationary. Levels, differenced, and log-differenced are stationary.
+
+
+__ACF & PACF Plots__
+
+```{r}
+par(mfrow=c(2,4))
+Acf(pv2, main="ACF non-differenced")
+Acf(diff(pv2), main="ACF differenced")
+Acf(diff(pv2,12), main="ACF seasonally \ndifferenced")
+Acf(diff(diff(pv2,12)), main="ACF seasonally and \nnon-seasonally differenced")
+Pacf(pv2, main="PACF non-differenced")
+Pacf(diff(pv2), main="PACF differenced")
+Pacf(diff(pv2,12), main="PACF seasonally \ndifferenced")
+Pacf(diff(diff(pv2,12)), main="PACF seasonally and \nnon-seasonally differenced")
+```
+
+The levels data seem to have no significant correlation with its lags. After differencing, ACF and PACF suggests a MA(1) component due to the exponential decay in PACF and a significant first lag in the ACF.
+
+The seasonally and non-seasonally differenced data also suggest MA(1).
+
+
+```{r}
+pv2 %>% diff() %>% 
+  ggtsdisplay(main="Total # of Photovoltaic Installations (1st level difference)", lag.max = 36)
+
+diff(pv2,12) %>% 
+  ggtsdisplay(main="Total # of Photovoltaic Installations (Seasonal difference)", lag.max = 36)
+
+diff(pv2,12) %>% diff() %>% 
+  ggtsdisplay(main="Total # of Photovoltaic Installations (Seasonal & non-seasonal difference)", lag.max = 36)
+```
+
+Looking closer, the 1st and 12th lags in the ACF of the seasonal and non-seasonal differenced data are significant, while the PACF is declining, however, it's hard to say that there is strong seasonality in the data.
+
+### b. Modelling
+
+__ARIMA(0,1,1)__
+```{r}
+out.pv1 <- Arima(pv2, order=c(0,1,1), include.constant = TRUE, method="ML")
+htmltools::HTML(htmlreg(out.pv1, custom.model.names="ARIMA(0,1,1)", 
+        caption.above = TRUE, custom.note = "",
+        caption="ARIMA(0,1,1) Estimation Output"))
+#Box Test
+Box.test(out.pv1$residuals, type="Ljung-Box", lag = 20, fitdf=1)
+```
+
+The model passes the LBQ test using only an ARIMA(0,1,1). To check how a seasonal ARIMA might perform:
+
+__ARIMA(0,1,1)(0,1,1)__
+```{r}
+out.pv <- Arima(pv2, order=c(0,1,1), seasonal = c(0,1,1), include.constant = TRUE, method="ML")
+htmltools::HTML(htmlreg(out.pv, custom.model.names="ARIMA(0,1,1)(0,1,1)", 
+        caption.above = TRUE, custom.note = "",
+        caption="ARIMA(0,1,1)(0,1,1) Estimation Output"))
+
+#Residuals
+e.pv <- out.pv$residuals
+
+#Box Test
+Box.test(e.pv, type="Ljung-Box", lag = 20, fitdf=2)
+```
+The model also passed the Ljung-Box test, and it has a lower AIC.
+
+To check with auto.arima:
+
+```{r}
+out.autopv <- auto.arima(pv2,d=1,ic="aic")
+summary(out.autopv)
+```
+
+`auto.arima` used 3 ARs but ARIMA(0,1,1)(0,1,1) still has the lowest AIC.
+
+### c. Forecasting
+```{r}
+autoplot(forecast(out.pv,h=12))
+```
+
+```{r}
+htmltools::HTML(htmlreg(out.pv, custom.model.names="ARIMA(0,1,1)(0,1,1)", 
+        caption.above = TRUE, custom.note = "",
+        caption="ARIMA(0,1,1)(0,1,1) Estimation Output"))
+```
+
+```{r}
+library(kableExtra)
+
+kable(forecast(out.pv,h=12,level=.95), "html", caption="Forecasts") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+While I was able to forecast the number of photovoltaic installations in Australia to some degree, the confidence intervals are wide, as expected. This is because there may be some other factors that affect the number of installations. As mentioned, there are some peaks in the data which are not consistently yearly.
+
+
+# US E-Commerce Retail Sales ; Millions of Dollars ; Not Seasonally Adjusted (ECOMNSA)
+
+### a. Reading and plotting the data
+```{r}
+library(fredr)
+fredr_set_key("1ec5788f760c66c59e889464e8367636")
+us.raw <- fredr(series_id = "ECOMNSA")
+
+# turn into time-series data
+us <- ts(us.raw$value, start=c(1999,4), frequency=4)
+
+dygraph(us, main="US E-Commerce Retail Sales ; Millions of Dollars")%>% 
+  dyRangeSelector() %>%
+  dyAxis("y",label = "$ (M)")
+```
+
+From the plot, it seems like it has seasonality and the variances are increasing over time. It is likely that a logarithmic transformation and at least 1 seasonal differencing are needed.
+
+
+```{r}
+lx <- log(us)
+par(mfrow=c(2,4))
+Acf(lx, main="ACF non-differenced")
+Acf(diff(lx), main="ACF differenced")
+Acf(diff(lx,4), main="ACF seasonally \ndifferenced")
+Acf(diff(diff(lx,4)), main="ACF seasonally and \nnon-seasonally differenced")
+Pacf(lx, main="PACF non-differenced")
+Pacf(diff(lx), main="PACF differenced")
+Pacf(diff(lx,4), main="PACF seasonally \ndifferenced")
+Pacf(diff(diff(lx,4)), main="PACF seasonally and \nnon-seasonally differenced")
+```
+
+From the ACFs and PACFs above, the first two from the left look non-stationary due to its slow decline of ACFs.
+
+Meanwhile, the two on the right seem stationary. Based on the seasonally-differenced data, there is an AR(1) component, suggesting an __ARIMA(1,0,0)(0,1,0)__ model. On the other hand, the seasonally and non-seasonally differenced data has significant lags that suggest an __ARIMA(1,1,0)(0,1,1)__. 
+
+
+### b. Modelling
+
+__ARIMA(1,0,0)(0,1,0)__ 
+```{r}
+out.us <- Arima(lx, order=c(1,0,0), seasonal = c(0,1,0), include.constant = TRUE, method="ML")
+htmltools::HTML(htmlreg(out.us, custom.model.names="ARIMA(1,0,0)(0,1,0)", 
+        caption.above = TRUE, custom.note = "",
+        caption="ARIMA(1,0,0)(0,1,0) Estimation Output"))
+
+#Residuals
+e.us <- out.us$residuals
+
+#Box Test
+Box.test(e.us, type="Ljung-Box", lag = 20, fitdf=2)
+```
+LBQ Test shows a p-value greater than the 10% significance level, suggesting no autocorrelation in its residuals. This suggests that it is a valid model.
+
+
+__ARIMA(1,1,0)(0,1,1)__
+```{r}
+out.us2 <- Arima(lx, order=c(1,1,0), seasonal = c(0,1,1), include.constant = TRUE, method="ML")
+htmltools::HTML(htmlreg(out.us2, custom.model.names="ARIMA(1,1,0)(0,1,1)", 
+        caption.above = TRUE, custom.note = "",
+        caption="ARIMA(1,1,0)(0,1,1) Estimation Output"))
+
+#Residuals
+e.us2 <- out.us2$residuals
+
+#Box Test
+Box.test(e.us2, type="Ljung-Box", lag = 20, fitdf=2)
+```
+
+LBQ Test shows a p-value greater than the 10% significance level as well, however, ARIMA(1,1,0)(0,1,1) has a lower AIC.
+
+__`auto.arima()`__
+```{r}
+auto.arima(lx,D=1,ic="aic")
+```
+
+`auto.arima()` shows a similar model to the 2nd one. As such, this will be used for forecasting.
+
+### c. Forecasting
+
+__Forecasting the next 4 quarters__
+
+```{r}
+library(ggplot2)
+library(scales)
+
+fc.us = forecast(out.us2, fan=TRUE, h=4)
+
+fc.us <- unlog(fc.us, us, out.us2)
+
+autoplot(fc.us, ylab="$(M)", include=50) + scale_y_continuous(labels=comma)
+```
+
+The large confidence intervals in the forecasts are likely due to a structural change (i.e. COVID-19) that resulted in a significant increase in e-commerce sales during the pandemic around 2020.
+
+```{r}
+htmltools::HTML(htmlreg(out.us2, custom.model.names="ARIMA(1,1,0)(0,1,1)", 
+        caption.above = TRUE, custom.note = "",
+        caption="ARIMA(1,1,0)(0,1,1) Estimation Output"))
+```
+
+```{r}
+# Re-forecast with only 95% CI
+fc.us.kable <- forecast(out.us2, level=.95, h=4)
+fc.us.kable <- unlog(fc.us.kable, us, out.us2)
+
+kable(fc.us.kable, "html", caption="Forecasts") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
